@@ -1,0 +1,71 @@
+# Tempo da demo: busca o radar, o satélite e o aviso de chuva na REDEMET e publica o site no GitHub Pages.
+# O publicar-demo.sh copia este arquivo para .github/workflows/ do repositório da demo, junto com o atualizar.py.
+# Precisa, no repositório da demo: o segredo REDEMET_API_KEY (Settings > Secrets and variables > Actions) e
+# o Pages publicado por "GitHub Actions" (Settings > Pages > Source). A chave nunca vai para o site.
+name: Tempo da demo
+
+on:
+  push:
+    branches: [main]          # cada publicação da demo já sai com o tempo
+  schedule:
+    - cron: "*/15 * * * *"    # o GitHub não garante o horário: às vezes atrasa 10 a 30 min
+  workflow_dispatch:          # botão "Run workflow" na aba Actions
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publicar:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.publicar.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Site (sem o script e as configurações)
+        run: |
+          mkdir _site
+          for item in $(ls -A); do
+            case "$item" in _site|.git|.github|tempo-script) ;; *) cp -r "$item" _site/ ;; esac
+          done
+
+      - name: Radar, satélite e aviso de chuva
+        env:
+          REDEMET_API_KEY: ${{ secrets.REDEMET_API_KEY }}
+        run: |
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install --quiet pillow
+          # sem resposta da REDEMET a demo sai sem o radar, mas sai
+          /tmp/venv/bin/python tempo-script/atualizar.py _site/tempo || echo "::warning::o script do tempo parou com erro"
+
+      # a REDEMET às vezes não responde: em vez de publicar a demo sem o radar, repete o último que está no ar
+      # (a demo mesma deixa de mostrar quando a imagem mais nova passa de 3 h)
+      - name: Sem resposta da REDEMET, fica o último radar publicado
+        env:
+          SITE: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+        run: |
+          mkdir -p _site/tempo && cd _site/tempo
+          if [ ! -f radar.json ]; then
+            curl -sfo radar.json "$SITE/tempo/radar.json" && echo "::warning::radar: repetido o publicado" || rm -f radar.json
+          fi
+          if [ ! -f satelite.json ] && curl -sfo satelite.json "$SITE/tempo/satelite.json"; then
+            for f in $(python3 -c "import json; [print(q['imagem'].split('/')[-1]) for q in json.load(open('satelite.json'))['quadros']]"); do
+              curl -sfo "$f" "$SITE/tempo/$f" || { rm -f satelite.json; break; }
+            done
+            [ -f satelite.json ] && echo "::warning::satélite: repetido o publicado"
+          fi
+          true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - id: publicar
+        uses: actions/deploy-pages@v4
